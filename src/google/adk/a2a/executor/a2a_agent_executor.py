@@ -21,10 +21,12 @@ import logging
 from typing import Awaitable
 from typing import Callable
 from typing import Optional
+from typing import Union
 import uuid
 
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.agent_execution.context import RequestContext
+from a2a.server.events import Event as A2AEvent
 from a2a.server.events.event_queue import EventQueue
 from a2a.types import Artifact
 from a2a.types import Message
@@ -51,8 +53,40 @@ from ..converters.request_converter import convert_a2a_request_to_agent_run_requ
 from ..converters.utils import _get_adk_metadata_key
 from ..experimental import a2a_experimental
 from .task_result_aggregator import TaskResultAggregator
+from ...agents.invocation_context import InvocationContext
 
 logger = logging.getLogger('google_adk.' + __name__)
+
+
+@a2a_experimental
+class ExecuteInterceptor(BaseModel):
+  """Interceptor for A2A execution lifecycle."""
+
+  before_agent_execute: Optional[
+      Callable[[RequestContext], Awaitable[RequestContext]]
+  ] = None
+
+  after_event: Optional[
+      Callable[
+          [
+              A2AEvent,
+              RequestContext,
+              "InvocationContext",
+          ],
+          Awaitable[Union[A2AEvent, list[A2AEvent], None]],
+      ]
+  ] = None
+
+  after_agent_execute: Optional[
+      Callable[
+          [
+              TaskStatusUpdateEvent,
+              RequestContext,
+              Optional["InvocationContext"],
+          ],
+          Awaitable[TaskStatusUpdateEvent],
+      ]
+  ] = None
 
 
 @a2a_experimental
@@ -69,6 +103,8 @@ class A2aAgentExecutorConfig(BaseModel):
       convert_a2a_request_to_agent_run_request
   )
   event_converter: AdkEventToA2AEventsConverter = convert_event_to_a2a_events
+
+  execute_interceptors: Optional[list[ExecuteInterceptor]] = None
 
 
 @a2a_experimental
@@ -134,6 +170,12 @@ class A2aAgentExecutor(AgentExecutor):
     """
     if not context.message:
       raise ValueError('A2A request must have a message')
+
+    # Trigger before_agent_execute interceptors
+    if self._config.execute_interceptors:
+      for interceptor in self._config.execute_interceptors:
+        if interceptor.before_agent_execute:
+          context = await interceptor.before_agent_execute(context)
 
     # for new task, create a task submitted event
     if not context.current_task:
@@ -230,10 +272,16 @@ class A2aAgentExecutor(AgentExecutor):
             context.context_id,
             self._config.gen_ai_part_converter,
         ):
-          task_result_aggregator.process_event(a2a_event)
-          await event_queue.enqueue_event(a2a_event)
+          new_events = await self._apply_after_event_interceptors(
+              a2a_event, context, invocation_context
+          )
+
+          for event_to_enqueue in new_events:
+            task_result_aggregator.process_event(event_to_enqueue)
+            await event_queue.enqueue_event(event_to_enqueue)
 
     # publish the task result event - this is final
+    final_status_event = None
     if (
         task_result_aggregator.task_state == TaskState.working
         and task_result_aggregator.task_status_message is not None
@@ -252,31 +300,38 @@ class A2aAgentExecutor(AgentExecutor):
               ),
           )
       )
-      # public the final status update event
-      await event_queue.enqueue_event(
-          TaskStatusUpdateEvent(
-              task_id=context.task_id,
-              status=TaskStatus(
-                  state=TaskState.completed,
-                  timestamp=datetime.now(timezone.utc).isoformat(),
-              ),
-              context_id=context.context_id,
-              final=True,
-          )
+      # prepare the final status update event
+      final_status_event = TaskStatusUpdateEvent(
+          task_id=context.task_id,
+          status=TaskStatus(
+              state=TaskState.completed,
+              timestamp=datetime.now(timezone.utc).isoformat(),
+          ),
+          context_id=context.context_id,
+          final=True,
       )
     else:
-      await event_queue.enqueue_event(
-          TaskStatusUpdateEvent(
-              task_id=context.task_id,
-              status=TaskStatus(
-                  state=task_result_aggregator.task_state,
-                  timestamp=datetime.now(timezone.utc).isoformat(),
-                  message=task_result_aggregator.task_status_message,
-              ),
-              context_id=context.context_id,
-              final=True,
-          )
+      # prepare the final status update event
+      final_status_event = TaskStatusUpdateEvent(
+          task_id=context.task_id,
+          status=TaskStatus(
+              state=task_result_aggregator.task_state,
+              timestamp=datetime.now(timezone.utc).isoformat(),
+              message=task_result_aggregator.task_status_message,
+          ),
+          context_id=context.context_id,
+          final=True,
       )
+
+    # Apply after_agent_execute interceptors
+    if self._config.execute_interceptors:
+      for interceptor in reverse(self._config.execute_interceptors):
+        if interceptor.after_agent_execute:
+          final_status_event = await interceptor.after_agent_execute(
+              final_status_event, context, invocation_context
+          )
+
+    await event_queue.enqueue_event(final_status_event)
 
   async def _prepare_session(
       self,
@@ -304,3 +359,24 @@ class A2aAgentExecutor(AgentExecutor):
       run_request.session_id = session.id
 
     return session
+
+async def _apply_after_event_interceptors(
+      self,
+      event: A2AEvent,
+      context: RequestContext,
+      invocation_context: InvocationContext,
+  ) -> list[A2AEvent]:
+    if self._config.execute_interceptors:
+      for interceptor in self._config.execute_interceptors:
+        if interceptor.after_event:
+          new_events = []
+          result = await interceptor.after_event(
+                event, context, invocation_context
+            )
+          if result is None:
+            continue
+          elif isinstance(result, list):
+            new_events = result
+          else:
+            new_events = [result]
+    return new_events

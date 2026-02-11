@@ -24,7 +24,9 @@ from a2a.types import TextPart
 from google.adk.a2a.converters.request_converter import AgentRunRequest
 from google.adk.a2a.executor.a2a_agent_executor import A2aAgentExecutor
 from google.adk.a2a.executor.a2a_agent_executor import A2aAgentExecutorConfig
+from google.adk.a2a.executor.a2a_agent_executor import ExecuteInterceptor
 from google.adk.events.event import Event
+from a2a.types import TaskStatusUpdateEvent
 from google.adk.runners import RunConfig
 from google.adk.runners import Runner
 from google.genai.types import Content
@@ -959,3 +961,282 @@ class TestA2aAgentExecutor:
       assert final_event.status.message == test_message
       assert final_event.task_id == "test-task-id"
       assert final_event.context_id == "test-context-id"
+
+
+class TestA2aAgentExecutorInterceptors:
+  """Test suite for ExecuteInterceptor in A2aAgentExecutor."""
+
+  def setup_method(self):
+    """Set up test fixtures."""
+    self.mock_runner = Mock(spec=Runner)
+    self.mock_runner.app_name = "test-app"
+    self.mock_runner.session_service = Mock()
+    self.mock_runner._new_invocation_context = Mock()
+    self.mock_runner.run_async = AsyncMock()
+
+    self.mock_a2a_part_converter = Mock()
+    self.mock_gen_ai_part_converter = Mock()
+    self.mock_request_converter = Mock()
+    self.mock_event_converter = Mock()
+
+    self.mock_context = Mock(spec=RequestContext)
+    self.mock_context.message = Mock(spec=Message)
+    self.mock_context.message.parts = [Mock(spec=TextPart)]
+    self.mock_context.current_task = None
+    self.mock_context.task_id = "test-task-id"
+    self.mock_context.context_id = "test-context-id"
+
+    self.mock_event_queue = Mock(spec=EventQueue)
+
+  async def _create_async_generator(self, items):
+    """Helper to create async generator from items."""
+    for item in items:
+      yield item
+
+  @pytest.mark.asyncio
+  async def test_interceptor_hooks_called(self):
+    """Test that all interceptor hooks are called correctly."""
+    
+    before_agent_called = False
+    after_event_called = False
+    after_agent_called = False
+    
+    # Define interceptor hooks
+    async def before_agent_execute(ctx):
+      nonlocal before_agent_called
+      before_agent_called = True
+      return ctx
+
+    async def after_event(event, ctx, inv_ctx):
+      nonlocal after_event_called
+      after_event_called = True
+      # Verify invocation context is passed
+      assert inv_ctx == self.mock_runner._new_invocation_context.return_value
+      return event
+
+    async def after_agent_execute(event, ctx, inv_ctx):
+      nonlocal after_agent_called
+      after_agent_called = True
+      # Verify invocation context is passed
+      assert inv_ctx == self.mock_runner._new_invocation_context.return_value
+      return event
+
+    interceptor = ExecuteInterceptor(
+        before_agent_execute=before_agent_execute,
+        after_event=after_event,
+        after_agent_execute=after_agent_execute,
+    )
+
+    config = A2aAgentExecutorConfig(
+        a2a_part_converter=self.mock_a2a_part_converter,
+        gen_ai_part_converter=self.mock_gen_ai_part_converter,
+        request_converter=self.mock_request_converter,
+        event_converter=self.mock_event_converter,
+        execute_interceptors=[interceptor]
+    )
+    
+    executor = A2aAgentExecutor(runner=self.mock_runner, config=config)
+
+    # Setup mocks for successful execution
+    self.mock_request_converter.return_value = AgentRunRequest(
+        user_id="test-user",
+        session_id="test-session",
+        new_message=Mock(spec=Content),
+        run_config=Mock(spec=RunConfig),
+    )
+    
+    mock_session = Mock()
+    mock_session.id = "test-session"
+    self.mock_runner.session_service.get_session = AsyncMock(return_value=mock_session)
+    
+    # Mock invocation context
+    mock_invocation_context = Mock()
+    self.mock_runner._new_invocation_context.return_value = mock_invocation_context
+    
+    # Mock agent run with one event
+    mock_event = Mock(spec=Event)
+    
+    async def mock_run_async(**kwargs):
+      async for item in self._create_async_generator([mock_event]):
+        yield item
+    
+    self.mock_runner.run_async = mock_run_async
+    
+    # Mock event converter to return one A2A event
+    mock_a2a_event = Mock()
+    self.mock_event_converter.return_value = [mock_a2a_event]
+
+    # Execute
+    await executor.execute(self.mock_context, self.mock_event_queue)
+
+    # Assertions
+    assert before_agent_called
+    assert after_event_called
+    assert after_agent_called
+    
+    # Verify events were enqueued
+    # task submitted, working, event, final
+    assert self.mock_event_queue.enqueue_event.call_count >= 4
+
+  @pytest.mark.asyncio
+  async def test_interceptor_chaining_and_modification(self):
+    """Test that interceptors chain correctly and can modify events."""
+    
+    # Interceptor 1: Appends "1" to task_id
+    async def before_agent_1(ctx):
+      ctx.task_id = ctx.task_id + "1"
+      return ctx
+    
+    # Interceptor 2: Appends "2" to task_id
+    async def before_agent_2(ctx):
+      ctx.task_id = ctx.task_id + "2"
+      return ctx
+
+    interceptor1 = ExecuteInterceptor(before_agent_execute=before_agent_1)
+    interceptor2 = ExecuteInterceptor(before_agent_execute=before_agent_2)
+    
+    config = A2aAgentExecutorConfig(
+        a2a_part_converter=self.mock_a2a_part_converter,
+        gen_ai_part_converter=self.mock_gen_ai_part_converter,
+        request_converter=self.mock_request_converter,
+        event_converter=self.mock_event_converter,
+        execute_interceptors=[interceptor1, interceptor2]
+    )
+    
+    executor = A2aAgentExecutor(runner=self.mock_runner, config=config)
+    
+    # Setup mocks
+    self.mock_request_converter.return_value = AgentRunRequest(
+        user_id="test-user",
+        session_id="test-session",
+        new_message=Mock(spec=Content),
+        run_config=Mock(spec=RunConfig),
+    )
+    
+    mock_session = Mock()
+    mock_session.id = "test-session"
+    self.mock_runner.session_service.get_session = AsyncMock(return_value=mock_session)
+    self.mock_runner._new_invocation_context.return_value = Mock()
+    
+    async def mock_run_async(**kwargs):
+        async for item in self._create_async_generator([]):
+            yield item
+    self.mock_runner.run_async = mock_run_async
+    
+    # Initial task_id
+    self.mock_context.task_id = "initial"
+    
+    # Execute
+    await executor.execute(self.mock_context, self.mock_event_queue)
+    
+    # Verify task_id was modified in order
+    assert self.mock_context.task_id == "initial12"
+
+  @pytest.mark.asyncio
+  async def test_after_event_interceptor_filtering(self):
+    """Test that after_event interceptor can filter out events (return None)."""
+    
+    # Interceptor returns None to drop event
+    async def after_event_filter(event, ctx, inv_ctx):
+        return None
+
+    interceptor = ExecuteInterceptor(after_event=after_event_filter)
+    
+    config = A2aAgentExecutorConfig(
+        a2a_part_converter=self.mock_a2a_part_converter,
+        gen_ai_part_converter=self.mock_gen_ai_part_converter,
+        request_converter=self.mock_request_converter,
+        event_converter=self.mock_event_converter,
+        execute_interceptors=[interceptor]
+    )
+    
+    executor = A2aAgentExecutor(runner=self.mock_runner, config=config)
+    
+    # Setup
+    self.mock_request_converter.return_value = AgentRunRequest(
+        user_id="test-user",
+        session_id="test-session",
+        new_message=Mock(spec=Content),
+        run_config=Mock(spec=RunConfig),
+    )
+    
+    mock_session = Mock()
+    mock_session.id = "test-session"
+    self.mock_runner.session_service.get_session = AsyncMock(return_value=mock_session)
+    self.mock_runner._new_invocation_context.return_value = Mock()
+    
+    mock_event = Mock(spec=Event)
+    async def mock_run_async(**kwargs):
+      async for item in self._create_async_generator([mock_event]):
+        yield item
+    self.mock_runner.run_async = mock_run_async
+    
+    # Event converter returns one event which should be filtered
+    mock_a2a_event = Mock()
+    self.mock_event_converter.return_value = [mock_a2a_event]
+    
+    # Execute
+    await executor.execute(self.mock_context, self.mock_event_queue)
+    
+    # Verify enqueue_event was NOT called for the dropped event
+    # It might be called for submitted/working/final, but NOT for the intermediate event
+    events_enqueued = [
+        call[0][0] for call in self.mock_event_queue.enqueue_event.call_args_list
+    ]
+    # Check that mock_a2a_event is NOT in events_enqueued
+    assert mock_a2a_event not in events_enqueued
+
+  @pytest.mark.asyncio
+  async def test_after_event_interceptor_expansion(self):
+    """Test that after_event interceptor can return a list of events."""
+    
+    # Interceptor returns list of 2 events
+    async def after_event_expand(event, ctx, inv_ctx):
+        return [event, event]
+
+    interceptor = ExecuteInterceptor(after_event=after_event_expand)
+    
+    config = A2aAgentExecutorConfig(
+        a2a_part_converter=self.mock_a2a_part_converter,
+        gen_ai_part_converter=self.mock_gen_ai_part_converter,
+        request_converter=self.mock_request_converter,
+        event_converter=self.mock_event_converter,
+        execute_interceptors=[interceptor]
+    )
+    
+    executor = A2aAgentExecutor(runner=self.mock_runner, config=config)
+    
+    # Setup
+    self.mock_request_converter.return_value = AgentRunRequest(
+        user_id="test-user",
+        session_id="test-session",
+        new_message=Mock(spec=Content),
+        run_config=Mock(spec=RunConfig),
+    )
+    
+    mock_session = Mock()
+    mock_session.id = "test-session"
+    self.mock_runner.session_service.get_session = AsyncMock(return_value=mock_session)
+    self.mock_runner._new_invocation_context.return_value = Mock()
+    
+    mock_event = Mock(spec=Event)
+    async def mock_run_async(**kwargs):
+      async for item in self._create_async_generator([mock_event]):
+        yield item
+    self.mock_runner.run_async = mock_run_async
+    
+    mock_a2a_event = Mock()
+    self.mock_event_converter.return_value = [mock_a2a_event]
+    
+    # Execute
+    await executor.execute(self.mock_context, self.mock_event_queue)
+    
+    # Verify enqueue_event was called TWICE for the event (plus others)
+    events_enqueued = [
+        call[0][0] for call in self.mock_event_queue.enqueue_event.call_args_list
+    ]
+    
+    # Count occurrences of mock_a2a_event
+    count = events_enqueued.count(mock_a2a_event)
+    assert count == 2
+
