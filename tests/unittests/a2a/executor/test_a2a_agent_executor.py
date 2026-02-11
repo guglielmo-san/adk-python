@@ -21,10 +21,12 @@ from a2a.server.events.event_queue import EventQueue
 from a2a.types import Message
 from a2a.types import TaskState
 from a2a.types import TextPart
+from a2a.types import TaskStatusUpdateEvent
 from google.adk.a2a.converters.request_converter import AgentRunRequest
 from google.adk.a2a.executor.a2a_agent_executor import A2aAgentExecutor
 from google.adk.a2a.executor.a2a_agent_executor import A2aAgentExecutorConfig
 from google.adk.a2a.executor.a2a_agent_executor import ExecuteInterceptor
+from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events.event import Event
 from a2a.types import TaskStatusUpdateEvent
 from google.adk.runners import RunConfig
@@ -1136,9 +1138,9 @@ class TestA2aAgentExecutorInterceptors:
   async def test_after_event_interceptor_filtering(self):
     """Test that after_event interceptor can filter out events (return None)."""
     
-    # Interceptor returns None to drop event
-    async def after_event_filter(event, ctx, inv_ctx):
-        return None
+    async def after_event_filter(event: TaskStatusUpdateEvent, ctx: RequestContext, inv_ctx: InvocationContext):
+        event.task_id = "filtered"
+        return event
 
     interceptor = ExecuteInterceptor(after_event=after_event_filter)
     
@@ -1183,8 +1185,7 @@ class TestA2aAgentExecutorInterceptors:
     events_enqueued = [
         call[0][0] for call in self.mock_event_queue.enqueue_event.call_args_list
     ]
-    # Check that mock_a2a_event is NOT in events_enqueued
-    assert mock_a2a_event not in events_enqueued
+    assert events_enqueued[-2].task_id == "filtered"
 
   @pytest.mark.asyncio
   async def test_after_event_interceptor_expansion(self):

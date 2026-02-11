@@ -71,7 +71,7 @@ class ExecuteInterceptor(BaseModel):
           [
               A2AEvent,
               RequestContext,
-              "InvocationContext",
+              InvocationContext,
           ],
           Awaitable[Union[A2AEvent, list[A2AEvent], None]],
       ]
@@ -82,7 +82,7 @@ class ExecuteInterceptor(BaseModel):
           [
               TaskStatusUpdateEvent,
               RequestContext,
-              Optional["InvocationContext"],
+              InvocationContext,
           ],
           Awaitable[TaskStatusUpdateEvent],
       ]
@@ -325,7 +325,7 @@ class A2aAgentExecutor(AgentExecutor):
 
     # Apply after_agent_execute interceptors
     if self._config.execute_interceptors:
-      for interceptor in reverse(self._config.execute_interceptors):
+      for interceptor in reversed(self._config.execute_interceptors):
         if interceptor.after_agent_execute:
           final_status_event = await interceptor.after_agent_execute(
               final_status_event, context, invocation_context
@@ -360,19 +360,19 @@ class A2aAgentExecutor(AgentExecutor):
 
     return session
 
-async def _apply_after_event_interceptors(
-      self,
-      event: A2AEvent,
-      context: RequestContext,
-      invocation_context: InvocationContext,
-  ) -> list[A2AEvent]:
+  async def _apply_after_event_interceptors(
+        self,
+        event: A2AEvent,
+        context: RequestContext,
+        invocation_context: InvocationContext,
+    ) -> list[A2AEvent]:
+    new_events = [event]
     if self._config.execute_interceptors:
       for interceptor in self._config.execute_interceptors:
         if interceptor.after_event:
-          new_events = []
           result = await interceptor.after_event(
                 event, context, invocation_context
-            )
+              )
           if result is None:
             continue
           elif isinstance(result, list):
