@@ -33,8 +33,6 @@ from a2a.types import Task
 from a2a.types import TaskState
 from a2a.types import TaskStatus
 from a2a.types import TaskStatusUpdateEvent
-from a2a.types import TaskArtifactUpdateEvent
-from a2a.types import Artifact
 from a2a.types import TextPart
 from google.genai import types as genai_types
 
@@ -67,7 +65,6 @@ AdkEventToA2AEventsConverter = Callable[
         Optional[str],
         Optional[str],
         GenAIPartToA2APartConverter,
-        Optional[Dict[str, str]],
     ],
     List[A2AEvent],
 ]
@@ -536,7 +533,6 @@ def convert_event_to_a2a_events(
     task_id: Optional[str] = None,
     context_id: Optional[str] = None,
     part_converter: GenAIPartToA2APartConverter = convert_genai_part_to_a2a_part,
-    active_artifacts: Optional[Dict[str, str]] = None,
 ) -> List[A2AEvent]:
   """Converts a GenAI event to a list of A2A events.
 
@@ -574,37 +570,10 @@ def convert_event_to_a2a_events(
         event, invocation_context, part_converter=part_converter
     )
     if message:
-      status_event = _create_status_update_event(
+      running_event = _create_status_update_event(
           message, invocation_context, event, task_id, context_id
       )
-      
-      if status_event.status.state in (TaskState.failed, TaskState.input_required, TaskState.auth_required):
-        if not event.partial:
-          a2a_events.append(status_event)
-      else:
-          agent_name = getattr(event, "author", "a2a agent")
-          is_partial = getattr(event, "partial", False) is True
-          
-          if active_artifacts is None:
-            raise Exception("Active artifacts cannot be None")
-          append = is_partial
-          if agent_name not in active_artifacts:
-              active_artifacts[agent_name] = str(uuid.uuid4())
-              # append = False
-          artifact_id = active_artifacts[agent_name]
-          if not is_partial:
-              del active_artifacts[agent_name]
-          
-          a2a_events.append(TaskArtifactUpdateEvent(
-              task_id=task_id,
-              context_id=context_id,
-              last_chunk=not is_partial,
-              append=append,
-              artifact=Artifact(
-                  artifact_id=artifact_id,
-                  parts=message.parts,
-              )
-          ))
+      a2a_events.append(running_event)
 
   except Exception as e:
     logger.error("Failed to convert event to A2A events: %s", e)
