@@ -34,6 +34,7 @@ from a2a.types import TaskState
 from a2a.types import TaskStatus
 from a2a.types import TaskStatusUpdateEvent
 from a2a.types import TextPart
+from a2a.types import Task
 from google.adk.runners import Runner
 from pydantic import BaseModel
 from typing_extensions import override
@@ -138,16 +139,15 @@ class A2aAgentExecutor(AgentExecutor):
     # for new task, create a task submitted event
     if not context.current_task:
       await event_queue.enqueue_event(
-          TaskStatusUpdateEvent(
-              task_id=context.task_id,
+          Task(
+              id=context.task_id,
               status=TaskStatus(
                   state=TaskState.submitted,
                   message=context.message,
                   timestamp=datetime.now(timezone.utc).isoformat(),
-              ),
+                ),
               context_id=context.context_id,
-              final=False,
-          )
+            )
       )
 
     # Handle the request and publish updates to the event queue
@@ -220,63 +220,52 @@ class A2aAgentExecutor(AgentExecutor):
         )
     )
 
-    task_result_aggregator = TaskResultAggregator()
+    active_artifacts = {}
+    terminal_state_emitted = None
+    
     async with Aclosing(runner.run_async(**vars(run_request))) as agen:
       async for adk_event in agen:
-        for a2a_event in self._config.event_converter(
+        a2a_events = self._config.event_converter(
             adk_event,
             invocation_context,
             context.task_id,
             context.context_id,
             self._config.gen_ai_part_converter,
-        ):
-          task_result_aggregator.process_event(a2a_event)
-          await event_queue.enqueue_event(a2a_event)
+            active_artifacts,
+        )
+        
+        for a2a_event in a2a_events:
+            if isinstance(a2a_event, TaskStatusUpdateEvent):
+                state = a2a_event.status.state
+                if state in (TaskState.failed, TaskState.input_required, TaskState.auth_required):
+                    terminal_state_emitted = state
+            await event_queue.enqueue_event(a2a_event)
 
-    # publish the task result event - this is final
-    if (
-        task_result_aggregator.task_state == TaskState.working
-        and task_result_aggregator.task_status_message is not None
-        and task_result_aggregator.task_status_message.parts
-    ):
-      # if task is still working properly, publish the artifact update event as
-      # the final result according to a2a protocol.
-      await event_queue.enqueue_event(
-          TaskArtifactUpdateEvent(
-              task_id=context.task_id,
-              last_chunk=True,
-              context_id=context.context_id,
-              artifact=Artifact(
-                  artifact_id=str(uuid.uuid4()),
-                  parts=task_result_aggregator.task_status_message.parts,
-              ),
-          )
-      )
-      # public the final status update event
-      await event_queue.enqueue_event(
-          TaskStatusUpdateEvent(
-              task_id=context.task_id,
-              status=TaskStatus(
-                  state=TaskState.completed,
-                  timestamp=datetime.now(timezone.utc).isoformat(),
-              ),
-              context_id=context.context_id,
-              final=True,
-          )
-      )
+    # Loop Termination
+    if terminal_state_emitted:
+        await event_queue.enqueue_event(
+            TaskStatusUpdateEvent(
+                task_id=context.task_id,
+                context_id=context.context_id,
+                status=TaskStatus(
+                    state=terminal_state_emitted,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                ),
+                final=True,
+            )
+        )
     else:
-      await event_queue.enqueue_event(
-          TaskStatusUpdateEvent(
-              task_id=context.task_id,
-              status=TaskStatus(
-                  state=task_result_aggregator.task_state,
-                  timestamp=datetime.now(timezone.utc).isoformat(),
-                  message=task_result_aggregator.task_status_message,
-              ),
-              context_id=context.context_id,
-              final=True,
-          )
-      )
+        await event_queue.enqueue_event(
+            TaskStatusUpdateEvent(
+                task_id=context.task_id,
+                context_id=context.context_id,
+                status=TaskStatus(
+                    state=TaskState.completed,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                ),
+                final=True,
+            )
+        )
 
   async def _prepare_session(
       self,
