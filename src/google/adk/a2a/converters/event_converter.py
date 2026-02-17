@@ -33,6 +33,7 @@ from a2a.types import Task
 from a2a.types import TaskState
 from a2a.types import TaskStatus
 from a2a.types import TaskStatusUpdateEvent
+from a2a.types import TaskArtifactUpdateEvent
 from a2a.types import TextPart
 from google.genai import types as genai_types
 
@@ -199,7 +200,7 @@ def _process_long_running_tool(a2a_part: A2APart, event: Event) -> None:
 
 
 def convert_a2a_task_to_event(
-    a2a_task: Task,
+    a2a_task: Task | TaskArtifactUpdateEvent,
     author: Optional[str] = None,
     invocation_context: Optional[InvocationContext] = None,
     part_converter: A2APartToGenAIPartConverter = convert_a2a_part_to_genai_part,
@@ -226,18 +227,26 @@ def convert_a2a_task_to_event(
   try:
     # Extract message from task status or history
     message = None
-    if a2a_task.artifacts:
+    if isinstance(a2a_task, TaskArtifactUpdateEvent) and a2a_task.artifact:
       message = Message(
-          message_id="", role=Role.agent, parts=a2a_task.artifacts[-1].parts
+          message_id="", role=Role.agent, parts=a2a_task.artifact.parts
       )
-    elif (
-        a2a_task.status
-        and a2a_task.status.message
-        and a2a_task.status.message.parts
-    ):
-      message = a2a_task.status.message
-    elif a2a_task.history:
-      message = a2a_task.history[-1]
+    elif isinstance(a2a_task, Task) and a2a_task.status.state != TaskState.submitted:
+      if a2a_task.artifacts:
+        parts = []
+        for artifact in a2a_task.artifacts:
+          parts.extend(artifact.parts)
+        message = Message(
+            message_id="", role=Role.agent, parts=parts
+        )
+      elif (
+          a2a_task.status
+          and a2a_task.status.message
+          and a2a_task.status.message.parts
+      ):
+        message = a2a_task.status.message
+      elif a2a_task.history:
+        message = a2a_task.history[-1]
 
     # Convert message if available
     if message:

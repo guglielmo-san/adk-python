@@ -430,21 +430,6 @@ class RemoteA2aAgent(BaseAgent):
           event = convert_a2a_task_to_event(
               task, self.name, ctx, self._a2a_part_converter
           )
-          # for streaming task, we update the event with the task status.
-          # We update the event as Thought updates.
-          if (
-              task
-              and task.status
-              and task.status.state
-              in (
-                  TaskState.submitted,
-                  TaskState.working,
-              )
-              and event.content is not None
-              and event.content.parts
-          ):
-            for part in event.content.parts:
-              part.thought = True
         elif (
             isinstance(update, A2ATaskStatusUpdateEvent)
             and update.status
@@ -454,15 +439,7 @@ class RemoteA2aAgent(BaseAgent):
           event = convert_a2a_message_to_event(
               update.status.message, self.name, ctx, self._a2a_part_converter
           )
-          if event.content is not None and update.status.state in (
-              TaskState.submitted,
-              TaskState.working,
-          ):
-            for part in event.content.parts:
-              part.thought = True
-        elif isinstance(update, A2ATaskArtifactUpdateEvent) and (
-            not update.append or update.last_chunk
-        ):
+        elif isinstance(update, A2ATaskArtifactUpdateEvent):
           # This is a streaming task artifact update.
           # We only handle full artifact updates and ignore partial updates.
           # Note: Depends on the server implementation, there is no clear
@@ -471,7 +448,7 @@ class RemoteA2aAgent(BaseAgent):
           # 1. append: True for partial updates, False for full updates.
           # 2. last_chunk: True for full updates, False for partial updates.
           event = convert_a2a_task_to_event(
-              task, self.name, ctx, self._a2a_part_converter
+              update, self.name, ctx, self._a2a_part_converter
           )
         else:
           # This is a streaming update without a message (e.g. status change)

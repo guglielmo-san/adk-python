@@ -28,6 +28,7 @@ from a2a.types import AgentCard, AgentCapabilities
 InMemorySessionService = in_memory_session_service.InMemorySessionService
 
 
+
 async def ask_for_city() -> dict[str, Any]:
   """Ask for a city."""
   return {"city": None}
