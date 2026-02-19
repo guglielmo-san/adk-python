@@ -9,6 +9,7 @@ from src.google.adk.sessions import in_memory_session_service
 from src.google.adk.agents import run_config, remote_a2a_agent
 from src.google.adk.agents.run_config import RunConfig
 from src.google.adk.apps import app as app_lib
+from src.google.adk.agents import llm_agent, sequential_agent
 from src.google.adk.apps.app import ResumabilityConfig
 from src.google.adk.cli import cli
 from google.genai import types 
@@ -73,24 +74,38 @@ async def main(argv):
 
 async def adk_web(argv):
   del argv  # Unused.
-  a2a_app = create_app()
 
+  """
+  a2a_app = create_app()
   # Create an HTTP client that communicates directly with the A2A app
   # We use the app as the transport to avoid needing a separate server process
   client = httpx.AsyncClient(
       transport=httpx.ASGITransport(app=a2a_app), base_url="http://test-agent"
   )
+  """
 
   # Create the remote agent using the client
   remote_agent = remote_a2a_agent.RemoteA2aAgent(
       name="remote_agent",
-      agent_card="http://test-agent/.well-known/agent.json",
+      agent_card="http://127.0.0.1:8000/.well-known/agent.json",
       a2a_client_factory=ClientFactory(
           ClientConfig(
             streaming=True,
-            httpx_client=client,
           )
       ),
+  )
+  summarize_agent = llm_agent.LlmAgent(
+      name="summarize_agent",
+      model="gemini-2.5-flash",
+      description="Agent specialized in changing the input.",
+      instruction="""
+                You will receive a text in input and you will add french words to it..
+               """,
+  )
+  sequential = sequential_agent.SequentialAgent(
+      name="sequential_agent",
+      description="Agent specialized running multiple agents in sequence",
+      sub_agents=[remote_agent, summarize_agent],
   )
   # Initialize a custom loader to mount the agent explicitly
   from src.google.adk.cli.utils.base_agent_loader import BaseAgentLoader
@@ -143,7 +158,7 @@ async def adk_web(argv):
   app = web_server.get_fast_api_app(web_assets_dir=web_assets_dir)
   
   # Configure and start FastAPI with Uvicorn
-  config = uvicorn.Config(app, host="127.0.0.1", port=8000)
+  config = uvicorn.Config(app, host="127.0.0.1", port=8001)
   server = uvicorn.Server(config)
   await server.serve()
 
